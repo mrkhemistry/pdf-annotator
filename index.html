@@ -3,6 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <title>PDF Annotator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Annotate PDFs in your browser. Save once, reopen anywhere — fully editable.">
+<meta name="theme-color" content="#0a84ff">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<meta property="og:title" content="PDF Annotator">
+<meta property="og:description" content="A free web-based PDF annotator for teaching. Cover answers, reveal during lessons, save inside the file.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mrkhemistry.github.io/pdf-annotator/">
+<meta property="og:image" content="https://mrkhemistry.github.io/pdf-annotator/icon.svg">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, sans-serif; background: #2a2a2a; color: #eee; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -83,6 +93,13 @@
 </div>
 <div id="status">Open a PDF to start.</div>
 
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch((err) => console.warn('SW registration failed:', err));
+    });
+  }
+</script>
 <script type="module">
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.mjs';
 import { PDFDocument, PDFName, PDFHexString, rgb, LineCapStyle } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm';
