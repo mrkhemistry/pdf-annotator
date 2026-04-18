@@ -1,7 +1,7 @@
 {
-  "name": "PDF Annotator",
-  "short_name": "Annotator",
-  "description": "Annotate PDFs in your browser. Annotations save inside the file and stay editable.",
+  "name": "Mr Khemistry PDF Annotator",
+  "short_name": "MK Annotator",
+  "description": "Mr Khemistry's PDF annotator. Annotate in your browser, save inside the file, stay editable.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

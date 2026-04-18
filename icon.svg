@@ -1,9 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#0a84ff"/>
-  <g transform="translate(120 100) rotate(-4 136 156)">
-    <rect width="272" height="312" rx="12" fill="white"/>
-    <rect x="32" y="80" width="208" height="36" fill="#fff200"/>
-    <path d="M 40 200 Q 110 175 180 205 T 240 215" stroke="#e41a1c" stroke-width="10" fill="none" stroke-linecap="round"/>
-    <path d="M 40 250 L 220 250" stroke="#e41a1c" stroke-width="8" fill="none" stroke-linecap="round"/>
-  </g>
+  <rect width="512" height="512" rx="80" fill="#0a0a0a"/>
+  <!-- Bubbles above flask -->
+  <circle cx="305" cy="80" r="18" fill="none" stroke="#a0c8d4" stroke-width="6"/>
+  <circle cx="335" cy="128" r="12" fill="none" stroke="#a0c8d4" stroke-width="5"/>
+  <!-- Flask body + neck (single outlined path) -->
+  <path d="M 215 165 L 215 260 L 120 420 Q 112 442 138 442 L 374 442 Q 400 442 392 420 L 297 260 L 297 165 Z"
+        stroke="#a0c8d4" stroke-width="14" fill="white" stroke-linejoin="round"/>
+  <!-- Liquid -->
+  <path d="M 174 348 L 132 420 Q 126 437 144 437 L 368 437 Q 386 437 380 420 L 338 348 Z" fill="#1d6e8a"/>
+  <!-- Big bubble in neck -->
+  <circle cx="256" cy="215" r="26" fill="none" stroke="#1d6e8a" stroke-width="8"/>
+  <!-- Mid bubbles -->
+  <circle cx="237" cy="295" r="12" fill="none" stroke="#1d6e8a" stroke-width="6"/>
+  <circle cx="272" cy="298" r="14" fill="#a0c8d4"/>
+  <circle cx="272" cy="298" r="5" fill="white"/>
+  <!-- Bubbles in liquid -->
+  <circle cx="222" cy="395" r="16" fill="none" stroke="#a0c8d4" stroke-width="4"/>
+  <circle cx="295" cy="378" r="11" fill="none" stroke="white" stroke-width="3"/>
+  <circle cx="322" cy="408" r="6" fill="none" stroke="white" stroke-width="2"/>
 </svg>

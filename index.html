@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>PDF Annotator</title>
+<title>Mr Khemistry PDF Annotator</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Annotate PDFs in your browser. Save once, reopen anywhere — fully editable.">
 <meta name="theme-color" content="#0a84ff">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<meta property="og:title" content="PDF Annotator">
+<meta property="og:title" content="Mr Khemistry PDF Annotator">
 <meta property="og:description" content="A free web-based PDF annotator for teaching. Cover answers, reveal during lessons, save inside the file.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://mrkhemistry.github.io/pdf-annotator/">
@@ -41,9 +41,16 @@
   body.teach #annotationCanvas { cursor: pointer; }
   #status { padding: 6px 12px; background: #1a1a1a; font-size: 12px; color: #888; border-top: 1px solid #444; }
   #empty { color: #888; padding: 60px; text-align: center; font-size: 14px; line-height: 1.6; }
+  #brandbar { background: #0a0a0a; padding: 6px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #1a1a1a; }
+  #brandbar img { width: 26px; height: 26px; }
+  #brandbar span { font-size: 14px; font-weight: 600; color: #a0c8d4; letter-spacing: 0.5px; }
 </style>
 </head>
 <body>
+<div id="brandbar">
+  <img src="icon.svg" alt="">
+  <span>Mr Khemistry PDF Annotator</span>
+</div>
 <div id="toolbar">
   <button id="openBtn">Open PDF</button>
   <input type="file" id="fileInput" accept=".pdf" hidden>
