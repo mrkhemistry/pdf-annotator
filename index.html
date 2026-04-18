@@ -6,7 +6,7 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, sans-serif; background: #2a2a2a; color: #eee; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-  #toolbar { background: #1a1a1a; padding: 8px 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #444; }
+  #toolbar { background: #1a1a1a; padding: 8px 12px; display: flex; gap: 6px; align-items: center; justify-content: center; flex-wrap: wrap; border-bottom: 1px solid #444; }
   #toolbar button { background: #333; color: #eee; border: 1px solid #555; padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 13px; }
   #toolbar button:hover { background: #444; }
   #toolbar button.active { background: #0a84ff; border-color: #0a84ff; }
@@ -38,11 +38,13 @@
   <button id="openBtn">Open PDF</button>
   <input type="file" id="fileInput" accept=".pdf" hidden>
   <button id="saveBtn">Save PDF</button>
+  <button id="exportBtn" title="Export a PDF with annotations baked in (visible in any viewer, no longer editable)">Export Flat PDF</button>
   <span class="divider"></span>
   <button class="tool active" data-tool="ink">Ink</button>
   <button class="tool" data-tool="highlight">Highlight</button>
   <button class="tool" data-tool="cover">Cover</button>
   <button class="tool" data-tool="eraser">Eraser</button>
+  <button class="tool" data-tool="snip">Snip</button>
   <button id="teachBtn">Teach Mode</button>
   <button id="resetCoversBtn">Reset Covers</button>
   <span class="divider"></span>
@@ -59,7 +61,7 @@
   <span id="zoomInfo" class="label">100%</span>
   <button id="zoomInBtn">+</button>
 </div>
-<div id="toolbar2" style="background:#1a1a1a;padding:6px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #444;">
+<div id="toolbar2" style="background:#1a1a1a;padding:6px 12px;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;border-bottom:1px solid #444;">
   <span class="label">Colors</span>
   <div id="palette" style="display:flex;gap:4px;"></div>
   <span class="divider" style="width:1px;background:#444;height:24px;margin:0 4px;"></span>
@@ -83,7 +85,7 @@
 
 <script type="module">
 import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.mjs';
-import { PDFDocument, PDFName, PDFHexString } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm';
+import { PDFDocument, PDFName, PDFHexString, rgb, LineCapStyle } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm';
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs';
 
 const ANNOT_KEY = 'AnnotData';
@@ -95,16 +97,23 @@ const PALETTE = [
   { name: 'Yellow', hex: '#fff200' },
   { name: 'Purple', hex: '#8e44ad' },
   { name: 'Brown',  hex: '#8b4513' },
-  { name: 'Black',  hex: '#000000' },
   { name: 'Orange', hex: '#ff7f0e' },
+  { name: 'Black',  hex: '#000000' },
+  { name: 'Gray',   hex: '#cccccc' },
+  { name: 'White',  hex: '#ffffff' },
 ];
 
 const DEFAULT_PRESETS = [
   { tool: 'ink',       color: '#e41a1c', size: 3 },
   { tool: 'ink',       color: '#1f78ff', size: 3 },
   { tool: 'ink',       color: '#000000', size: 2 },
+  { tool: 'ink',       color: '#2ca02c', size: 3 },
+  { tool: 'ink',       color: '#000000', size: 5 },
   { tool: 'highlight', color: '#fff200', size: 4 },
+  { tool: 'highlight', color: '#ff7f0e', size: 4 },
   { tool: 'cover',     color: '#cccccc', size: 5 },
+  { tool: 'cover',     color: '#cccccc', size: 9 },
+  { tool: 'eraser',    color: '#000000', size: 6 },
 ];
 
 let pdfDoc = null;
@@ -123,6 +132,11 @@ let annotations = [];
 let currentStroke = null;
 let nextId = 1;
 let renderToken = 0;
+let snipState = null;
+let snipStart = null;
+let tempRect = null;
+let clipboardImage = null;
+const imageCache = new Map();
 
 const pdfCanvas = document.getElementById('pdfCanvas');
 const hlCanvas = document.getElementById('highlightCanvas');
@@ -137,6 +151,7 @@ const emptyEl = document.getElementById('empty');
 document.getElementById('openBtn').onclick = () => document.getElementById('fileInput').click();
 document.getElementById('fileInput').onchange = handleFile;
 document.getElementById('saveBtn').onclick = savePdf;
+document.getElementById('exportBtn').onclick = exportFlattenedPdf;
 document.querySelectorAll('.tool').forEach(b => {
   b.onclick = () => setTool(b.dataset.tool);
 });
@@ -152,6 +167,16 @@ function setTool(t) {
   currentTool = t;
   document.querySelectorAll('.tool').forEach(x => x.classList.toggle('active', x.dataset.tool === t));
   if (teachMode) toggleTeach();
+  if (t === 'snip') {
+    snipState = clipboardImage ? 'paste' : 'select';
+    statusEl.textContent = clipboardImage
+      ? 'Click to paste the captured snip, or drag to capture a new region.'
+      : 'Drag a rectangle to capture a region.';
+  } else {
+    snipState = null;
+    tempRect = null;
+    redraw();
+  }
 }
 
 function setColor(hex) {
@@ -169,7 +194,13 @@ function setSize(n) {
 function loadPresets() {
   try {
     const stored = JSON.parse(localStorage.getItem('annot_presets'));
-    if (Array.isArray(stored) && stored.length === DEFAULT_PRESETS.length) return stored;
+    if (Array.isArray(stored) && stored.length > 0) {
+      const result = stored.slice(0, DEFAULT_PRESETS.length).map(p => ({ ...p }));
+      while (result.length < DEFAULT_PRESETS.length) {
+        result.push({ ...DEFAULT_PRESETS[result.length] });
+      }
+      return result;
+    }
   } catch {}
   return DEFAULT_PRESETS.map(p => ({ ...p }));
 }
@@ -346,15 +377,54 @@ function redraw() {
     if (a.page !== currentPage || a.hidden) continue;
     drawStroke(a);
   }
+  if (tempRect) {
+    annCtx.save();
+    annCtx.strokeStyle = '#0a84ff';
+    annCtx.setLineDash([6, 4]);
+    annCtx.lineWidth = 1;
+    annCtx.strokeRect(tempRect.x * scale, tempRect.y * scale, tempRect.w * scale, tempRect.h * scale);
+    annCtx.restore();
+  }
+}
+
+function getImage(dataUrl) {
+  if (imageCache.has(dataUrl)) return imageCache.get(dataUrl);
+  const img = new Image();
+  img.onload = () => redraw();
+  img.src = dataUrl;
+  imageCache.set(dataUrl, img);
+  return img;
+}
+
+function captureRegion(x, y, w, h) {
+  const sx = x * scale, sy = y * scale, sw = w * scale, sh = h * scale;
+  const tmp = document.createElement('canvas');
+  tmp.width = sw; tmp.height = sh;
+  const tctx = tmp.getContext('2d');
+  tctx.fillStyle = '#ffffff';
+  tctx.fillRect(0, 0, sw, sh);
+  tctx.drawImage(pdfCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  tctx.globalCompositeOperation = 'multiply';
+  tctx.drawImage(hlCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  tctx.globalCompositeOperation = 'source-over';
+  tctx.drawImage(annCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  return tmp.toDataURL('image/png');
 }
 
 function drawStroke(a) {
-  if (!a.points.length) return;
+  if (a.type === 'image') {
+    const img = getImage(a.dataUrl);
+    if (img.complete && img.naturalWidth > 0) {
+      annCtx.drawImage(img, a.x * scale, a.y * scale, a.width * scale, a.height * scale);
+    }
+    return;
+  }
+  if (!a.points || !a.points.length) return;
   const ctx = a.type === 'highlight' ? hlCtx : annCtx;
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.strokeStyle = a.color;
+  ctx.strokeStyle = a.type === 'highlight' ? highlightColor(a.color) : a.color;
   ctx.lineWidth = a.width * scale;
   ctx.beginPath();
   const [x0, y0] = a.points[0];
@@ -386,6 +456,29 @@ function onPointerDown(e) {
   try { annCanvas.setPointerCapture(e.pointerId); } catch {}
   const [x, y] = getPos(e);
 
+  if (currentTool === 'snip') {
+    if (snipState === 'paste' && clipboardImage) {
+      annotations.push({
+        id: nextId++,
+        page: currentPage,
+        type: 'image',
+        x: x - clipboardImage.width / 2,
+        y: y - clipboardImage.height / 2,
+        width: clipboardImage.width,
+        height: clipboardImage.height,
+        dataUrl: clipboardImage.dataUrl,
+      });
+      redraw();
+      statusEl.textContent = 'Pasted. Click again to paste another copy, or pick another tool.';
+      return;
+    }
+    snipState = 'select';
+    snipStart = [x, y];
+    tempRect = { x, y, w: 0, h: 0 };
+    redraw();
+    return;
+  }
+
   if (teachMode) {
     const hit = findCoverAt(x, y);
     if (hit) { hit.hidden = true; redraw(); }
@@ -408,6 +501,17 @@ function onPointerDown(e) {
 
 function onPointerMove(e) {
   if (!pdfDoc) return;
+  if (currentTool === 'snip' && snipState === 'select' && snipStart && e.buttons > 0) {
+    const [x, y] = getPos(e);
+    tempRect = {
+      x: Math.min(snipStart[0], x),
+      y: Math.min(snipStart[1], y),
+      w: Math.abs(x - snipStart[0]),
+      h: Math.abs(y - snipStart[1]),
+    };
+    redraw();
+    return;
+  }
   if (currentTool === 'eraser') {
     if (e.buttons > 0) {
       const [x, y] = getPos(e);
@@ -423,6 +527,21 @@ function onPointerMove(e) {
 }
 
 function onPointerUp(e) {
+  if (currentTool === 'snip' && snipState === 'select' && tempRect) {
+    if (tempRect.w > 5 && tempRect.h > 5) {
+      const dataUrl = captureRegion(tempRect.x, tempRect.y, tempRect.w, tempRect.h);
+      clipboardImage = { dataUrl, width: tempRect.w, height: tempRect.h };
+      snipState = 'paste';
+      statusEl.textContent = `Captured ${Math.round(tempRect.w)}×${Math.round(tempRect.h)}. Click anywhere to paste.`;
+    } else {
+      snipState = clipboardImage ? 'paste' : 'select';
+      statusEl.textContent = 'Snip too small. Drag a larger region.';
+    }
+    snipStart = null;
+    tempRect = null;
+    redraw();
+    return;
+  }
   if (currentStroke) {
     try { annCanvas.releasePointerCapture(e.pointerId); } catch {}
     currentStroke = null;
@@ -435,6 +554,14 @@ function eraseAt(x, y) {
   for (let i = annotations.length - 1; i >= 0; i--) {
     const a = annotations[i];
     if (a.page !== currentPage) continue;
+    if (a.type === 'image') {
+      if (x >= a.x && x <= a.x + a.width && y >= a.y && y <= a.y + a.height) {
+        annotations.splice(i, 1);
+        changed = true;
+      }
+      continue;
+    }
+    if (!a.points) continue;
     for (const [px, py] of a.points) {
       if (Math.hypot(px - x, py - y) < r) {
         annotations.splice(i, 1);
@@ -456,6 +583,93 @@ function findCoverAt(x, y) {
     }
   }
   return null;
+}
+
+function highlightColor(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  if (lum > 0.75) return hex;
+  const amount = 0.35 + (1 - lum) * 0.15;
+  const nr = Math.round(r + (255 - r) * amount);
+  const ng = Math.round(g + (255 - g) * amount);
+  const nb = Math.round(b + (255 - b) * amount);
+  return '#' + [nr, ng, nb].map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return rgb(
+    parseInt(h.slice(0, 2), 16) / 255,
+    parseInt(h.slice(2, 4), 16) / 255,
+    parseInt(h.slice(4, 6), 16) / 255
+  );
+}
+
+async function exportFlattenedPdf() {
+  if (!pdfDoc || !originalPdfBytes) return;
+  statusEl.textContent = 'Flattening…';
+  try {
+    const libDoc = await PDFDocument.load(originalPdfBytes.slice(0));
+    const total = libDoc.getPageCount();
+    for (let i = 0; i < total; i++) {
+      const page = libDoc.getPage(i);
+      const pageNum = i + 1;
+      const ph = page.getHeight();
+      const pageAnns = annotations.filter(a => a.page === pageNum && !a.hidden && a.points.length);
+      // Order: highlights first (under), then ink/cover (over)
+      pageAnns.sort((a, b) => (a.type === 'highlight' ? 0 : 1) - (b.type === 'highlight' ? 0 : 1));
+      for (const a of pageAnns) {
+        if (a.type === 'eraser') continue;
+        if (a.type === 'image') {
+          const base64 = a.dataUrl.split(',')[1];
+          const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+          const png = await libDoc.embedPng(bytes);
+          page.drawImage(png, {
+            x: a.x,
+            y: ph - a.y - a.height,
+            width: a.width,
+            height: a.height,
+          });
+          continue;
+        }
+        const colorHex = a.type === 'highlight' ? highlightColor(a.color) : a.color;
+        const color = hexToRgb(colorHex);
+        const opacity = a.type === 'highlight' ? 0.5 : 1;
+        if (a.points.length === 1) {
+          const [x, y] = a.points[0];
+          page.drawCircle({ x, y: ph - y, size: a.width / 2, color, opacity });
+        } else {
+          for (let k = 1; k < a.points.length; k++) {
+            const [x1, y1] = a.points[k - 1];
+            const [x2, y2] = a.points[k];
+            page.drawLine({
+              start: { x: x1, y: ph - y1 },
+              end:   { x: x2, y: ph - y2 },
+              thickness: a.width,
+              color,
+              opacity,
+              lineCap: LineCapStyle.Round,
+            });
+          }
+        }
+      }
+    }
+    const bytes = await libDoc.save();
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = pdfFileName + '-flat.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+    statusEl.textContent = `Exported flat copy: ${a.download}`;
+  } catch (err) {
+    console.error(err);
+    alert('Export failed: ' + err.message);
+    statusEl.textContent = 'Export failed.';
+  }
 }
 
 async function savePdf() {
