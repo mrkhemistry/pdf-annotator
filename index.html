@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PDF Annotator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #2a2a2a; color: #eee; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  #toolbar { background: #1a1a1a; padding: 8px 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #444; }
+  #toolbar button { background: #333; color: #eee; border: 1px solid #555; padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+  #toolbar button:hover { background: #444; }
+  #toolbar button.active { background: #0a84ff; border-color: #0a84ff; }
+  #toolbar .divider { width: 1px; background: #444; height: 24px; margin: 0 4px; }
+  #toolbar input[type=range] { width: 100px; }
+  #toolbar input[type=number] { width: 56px; background: #333; color: #eee; border: 1px solid #555; padding: 4px 6px; border-radius: 4px; }
+  .label { font-size: 12px; color: #aaa; }
+  .swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #555; cursor: pointer; padding: 0; }
+  .swatch.active { border-color: #fff; box-shadow: 0 0 0 2px #0a84ff; }
+  .preset { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 56px; height: 48px; background: #333; border: 1px solid #555; border-radius: 4px; cursor: pointer; gap: 2px; padding: 4px; }
+  .preset:hover { background: #444; }
+  .preset.active { border-color: #0a84ff; background: #1a3a5a; }
+  .preset .pname { font-size: 10px; color: #ccc; text-transform: uppercase; letter-spacing: 0.5px; }
+  .preset .pswatch { display: inline-block; width: 22px; height: 6px; border-radius: 3px; }
+  .preset .psize { font-size: 10px; color: #aaa; }
+  #pageInfo { font-size: 13px; min-width: 70px; text-align: center; }
+  #canvasWrap { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 20px; background: #2a2a2a; }
+  #canvasContainer { position: relative; box-shadow: 0 4px 20px rgba(0,0,0,0.5); background: white; }
+  #pdfCanvas { display: block; }
+  #highlightCanvas { position: absolute; top: 0; left: 0; mix-blend-mode: multiply; pointer-events: none; }
+  #annotationCanvas { position: absolute; top: 0; left: 0; touch-action: none; cursor: crosshair; }
+  body.teach #annotationCanvas { cursor: pointer; }
+  #status { padding: 6px 12px; background: #1a1a1a; font-size: 12px; color: #888; border-top: 1px solid #444; }
+  #empty { color: #888; padding: 60px; text-align: center; font-size: 14px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button id="openBtn">Open PDF</button>
+  <input type="file" id="fileInput" accept=".pdf" hidden>
+  <button id="saveBtn">Save PDF</button>
+  <span class="divider"></span>
+  <button class="tool active" data-tool="ink">Ink</button>
+  <button class="tool" data-tool="highlight">Highlight</button>
+  <button class="tool" data-tool="cover">Cover</button>
+  <button class="tool" data-tool="eraser">Eraser</button>
+  <button id="teachBtn">Teach Mode</button>
+  <button id="resetCoversBtn">Reset Covers</button>
+  <span class="divider"></span>
+  <span class="label">Size</span>
+  <input type="range" id="sizeSlider" min="1" max="30" value="3">
+  <span id="sizeLabel" class="label">3</span>
+  <span class="divider"></span>
+  <button id="prevBtn">◀</button>
+  <span id="pageInfo">– / –</span>
+  <button id="nextBtn">▶</button>
+  <input type="number" id="pageJump" min="1" placeholder="page">
+  <span class="divider"></span>
+  <button id="zoomOutBtn">−</button>
+  <span id="zoomInfo" class="label">100%</span>
+  <button id="zoomInBtn">+</button>
+</div>
+<div id="toolbar2" style="background:#1a1a1a;padding:6px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #444;">
+  <span class="label">Colors</span>
+  <div id="palette" style="display:flex;gap:4px;"></div>
+  <span class="divider" style="width:1px;background:#444;height:24px;margin:0 4px;"></span>
+  <span class="label">Presets <span style="font-size:10px;color:#666">(right-click to save current)</span></span>
+  <div id="presets" style="display:flex;gap:4px;"></div>
+</div>
+<div id="canvasWrap">
+  <div id="empty">
+    <strong>PDF Annotator</strong><br><br>
+    Click <b>Open PDF</b> to start. Annotations are embedded inside the PDF when you save —<br>
+    just reopen the saved PDF to keep editing.<br><br>
+    <span style="font-size:12px">Shortcuts: ← → page nav · T teach mode · R reset covers</span>
+  </div>
+  <div id="canvasContainer" style="display:none">
+    <canvas id="pdfCanvas"></canvas>
+    <canvas id="highlightCanvas"></canvas>
+    <canvas id="annotationCanvas"></canvas>
+  </div>
+</div>
+<div id="status">Open a PDF to start.</div>
+
+<script type="module">
+import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.mjs';
+import { PDFDocument, PDFName, PDFHexString } from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/+esm';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs';
+
+const ANNOT_KEY = 'AnnotData';
+
+const PALETTE = [
+  { name: 'Red',    hex: '#e41a1c' },
+  { name: 'Blue',   hex: '#1f78ff' },
+  { name: 'Green',  hex: '#2ca02c' },
+  { name: 'Yellow', hex: '#fff200' },
+  { name: 'Purple', hex: '#8e44ad' },
+  { name: 'Brown',  hex: '#8b4513' },
+  { name: 'Black',  hex: '#000000' },
+  { name: 'Orange', hex: '#ff7f0e' },
+];
+
+const DEFAULT_PRESETS = [
+  { tool: 'ink',       color: '#e41a1c', size: 3 },
+  { tool: 'ink',       color: '#1f78ff', size: 3 },
+  { tool: 'ink',       color: '#000000', size: 2 },
+  { tool: 'highlight', color: '#fff200', size: 4 },
+  { tool: 'cover',     color: '#cccccc', size: 5 },
+];
+
+let pdfDoc = null;
+let originalPdfBytes = null;
+let pdfFileName = 'document';
+let currentPage = 1;
+let scale = 1.5;
+const baseScale = 1.5;
+let currentTool = 'ink';
+let currentColor = '#e41a1c';
+let currentSize = 3;
+let activePreset = -1;
+let presets = loadPresets();
+let teachMode = false;
+let annotations = [];
+let currentStroke = null;
+let nextId = 1;
+let renderToken = 0;
+
+const pdfCanvas = document.getElementById('pdfCanvas');
+const hlCanvas = document.getElementById('highlightCanvas');
+const annCanvas = document.getElementById('annotationCanvas');
+const pdfCtx = pdfCanvas.getContext('2d');
+const hlCtx = hlCanvas.getContext('2d');
+const annCtx = annCanvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const container = document.getElementById('canvasContainer');
+const emptyEl = document.getElementById('empty');
+
+document.getElementById('openBtn').onclick = () => document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange = handleFile;
+document.getElementById('saveBtn').onclick = savePdf;
+document.querySelectorAll('.tool').forEach(b => {
+  b.onclick = () => setTool(b.dataset.tool);
+});
+document.getElementById('teachBtn').onclick = toggleTeach;
+document.getElementById('resetCoversBtn').onclick = resetCovers;
+document.getElementById('sizeSlider').oninput = e => {
+  currentSize = +e.target.value;
+  document.getElementById('sizeLabel').textContent = currentSize;
+  activePreset = -1; renderPresets();
+};
+
+function setTool(t) {
+  currentTool = t;
+  document.querySelectorAll('.tool').forEach(x => x.classList.toggle('active', x.dataset.tool === t));
+  if (teachMode) toggleTeach();
+}
+
+function setColor(hex) {
+  currentColor = hex;
+  document.querySelectorAll('.swatch').forEach(s => s.classList.toggle('active', s.dataset.hex === hex));
+}
+
+function setSize(n) {
+  currentSize = n;
+  const slider = document.getElementById('sizeSlider');
+  slider.value = n;
+  document.getElementById('sizeLabel').textContent = n;
+}
+
+function loadPresets() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('annot_presets'));
+    if (Array.isArray(stored) && stored.length === DEFAULT_PRESETS.length) return stored;
+  } catch {}
+  return DEFAULT_PRESETS.map(p => ({ ...p }));
+}
+
+function savePresetsLS() {
+  localStorage.setItem('annot_presets', JSON.stringify(presets));
+}
+
+function renderPalette() {
+  const wrap = document.getElementById('palette');
+  wrap.innerHTML = '';
+  for (const c of PALETTE) {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.dataset.hex = c.hex;
+    b.style.background = c.hex;
+    b.title = c.name;
+    if (c.hex === currentColor) b.classList.add('active');
+    b.onclick = () => { setColor(c.hex); activePreset = -1; renderPresets(); };
+    wrap.appendChild(b);
+  }
+}
+
+function renderPresets() {
+  const wrap = document.getElementById('presets');
+  wrap.innerHTML = '';
+  presets.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'preset' + (i === activePreset ? ' active' : '');
+    b.title = `${p.tool} · ${p.color} · size ${p.size}\nClick to apply · Right-click to overwrite with current`;
+    const name = document.createElement('div');
+    name.className = 'pname';
+    name.textContent = ({ highlight: 'HL', cover: 'Cover', eraser: 'Erase', ink: 'Ink' })[p.tool] || 'Ink';
+    const sw = document.createElement('div');
+    sw.className = 'pswatch';
+    sw.style.background = p.tool === 'eraser'
+      ? 'repeating-linear-gradient(45deg, #888 0 4px, #555 4px 8px)'
+      : p.color;
+    const sz = document.createElement('div');
+    sz.className = 'psize';
+    sz.textContent = p.size;
+    b.appendChild(name); b.appendChild(sw); b.appendChild(sz);
+    b.onclick = () => applyPreset(i);
+    b.oncontextmenu = (e) => { e.preventDefault(); savePresetFromCurrent(i); };
+    wrap.appendChild(b);
+  });
+}
+
+function applyPreset(i) {
+  const p = presets[i];
+  setTool(p.tool);
+  setColor(p.color);
+  setSize(p.size);
+  activePreset = i;
+  renderPresets();
+}
+
+function savePresetFromCurrent(i) {
+  presets[i] = { tool: currentTool, color: currentColor, size: currentSize };
+  savePresetsLS();
+  activePreset = i;
+  renderPresets();
+  statusEl.textContent = `Preset ${i + 1} saved: ${currentTool} ${currentColor} size ${currentSize}.`;
+}
+
+renderPalette();
+renderPresets();
+document.getElementById('prevBtn').onclick = () => goToPage(currentPage - 1);
+document.getElementById('nextBtn').onclick = () => goToPage(currentPage + 1);
+document.getElementById('pageJump').onchange = e => {
+  const n = +e.target.value;
+  if (n) goToPage(n);
+  e.target.value = '';
+};
+document.getElementById('zoomInBtn').onclick = () => setZoom(scale * 1.2);
+document.getElementById('zoomOutBtn').onclick = () => setZoom(scale / 1.2);
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft') goToPage(currentPage - 1);
+  else if (e.key === 'ArrowRight') goToPage(currentPage + 1);
+  else if (e.key.toLowerCase() === 'r') resetCovers();
+  else if (e.key.toLowerCase() === 't') toggleTeach();
+});
+
+function toggleTeach() {
+  teachMode = !teachMode;
+  document.body.classList.toggle('teach', teachMode);
+  const btn = document.getElementById('teachBtn');
+  btn.classList.toggle('active', teachMode);
+  btn.textContent = teachMode ? 'Teach Mode (ON)' : 'Teach Mode';
+}
+
+function resetCovers() {
+  let n = 0;
+  annotations.forEach(a => { if (a.type === 'cover' && a.hidden) { a.hidden = false; n++; } });
+  redraw();
+  if (n) statusEl.textContent = `Reset ${n} cover${n>1?'s':''}.`;
+}
+
+function setZoom(s) {
+  scale = Math.max(0.4, Math.min(4, s));
+  document.getElementById('zoomInfo').textContent = Math.round(scale * 100 / baseScale) + '%';
+  if (pdfDoc) renderPage();
+}
+
+async function handleFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  pdfFileName = file.name.replace(/\.pdf$/i, '');
+  originalPdfBytes = await file.arrayBuffer();
+
+  pdfDoc = await pdfjsLib.getDocument({ data: originalPdfBytes.slice(0) }).promise;
+
+  annotations = [];
+  nextId = 1;
+  try {
+    const libDoc = await PDFDocument.load(originalPdfBytes.slice(0));
+    const infoRef = libDoc.context.trailerInfo.Info;
+    if (infoRef) {
+      const infoDict = libDoc.context.lookup(infoRef);
+      const v = infoDict?.get(PDFName.of(ANNOT_KEY));
+      if (v) {
+        const b64 = typeof v.decodeText === 'function' ? v.decodeText() : v.asString();
+        const json = decodeURIComponent(escape(atob(b64)));
+        const data = JSON.parse(json);
+        annotations = data.annotations || [];
+        nextId = annotations.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
+      }
+    }
+  } catch (err) {
+    console.warn('No embedded annotations or failed to parse:', err);
+  }
+
+  currentPage = 1;
+  emptyEl.style.display = 'none';
+  container.style.display = 'block';
+  await renderPage();
+  statusEl.textContent = annotations.length
+    ? `Loaded ${file.name} (${pdfDoc.numPages} pages, ${annotations.length} annotations).`
+    : `Loaded ${file.name} (${pdfDoc.numPages} pages).`;
+
+  e.target.value = '';
+}
+
+async function renderPage() {
+  if (!pdfDoc) return;
+  const token = ++renderToken;
+  const page = await pdfDoc.getPage(currentPage);
+  if (token !== renderToken) return;
+  const viewport = page.getViewport({ scale });
+  pdfCanvas.width = hlCanvas.width = annCanvas.width = viewport.width;
+  pdfCanvas.height = hlCanvas.height = annCanvas.height = viewport.height;
+  container.style.width = viewport.width + 'px';
+  container.style.height = viewport.height + 'px';
+  await page.render({ canvasContext: pdfCtx, viewport }).promise;
+  if (token !== renderToken) return;
+  document.getElementById('pageInfo').textContent = `${currentPage} / ${pdfDoc.numPages}`;
+  redraw();
+}
+
+function goToPage(n) {
+  if (!pdfDoc) return;
+  n = Math.max(1, Math.min(pdfDoc.numPages, n));
+  if (n === currentPage) return;
+  currentPage = n;
+  renderPage();
+}
+
+function redraw() {
+  hlCtx.clearRect(0, 0, hlCanvas.width, hlCanvas.height);
+  annCtx.clearRect(0, 0, annCanvas.width, annCanvas.height);
+  for (const a of annotations) {
+    if (a.page !== currentPage || a.hidden) continue;
+    drawStroke(a);
+  }
+}
+
+function drawStroke(a) {
+  if (!a.points.length) return;
+  const ctx = a.type === 'highlight' ? hlCtx : annCtx;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = a.color;
+  ctx.lineWidth = a.width * scale;
+  ctx.beginPath();
+  const [x0, y0] = a.points[0];
+  ctx.moveTo(x0 * scale, y0 * scale);
+  for (let i = 1; i < a.points.length; i++) {
+    ctx.lineTo(a.points[i][0] * scale, a.points[i][1] * scale);
+  }
+  if (a.points.length === 1) {
+    ctx.lineTo(x0 * scale + 0.01, y0 * scale + 0.01);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+annCanvas.addEventListener('pointerdown', onPointerDown);
+annCanvas.addEventListener('pointermove', onPointerMove);
+annCanvas.addEventListener('pointerup', onPointerUp);
+annCanvas.addEventListener('pointercancel', onPointerUp);
+annCanvas.addEventListener('pointerleave', onPointerUp);
+
+function getPos(e) {
+  const rect = annCanvas.getBoundingClientRect();
+  return [(e.clientX - rect.left) / scale, (e.clientY - rect.top) / scale];
+}
+
+function onPointerDown(e) {
+  if (!pdfDoc) return;
+  e.preventDefault();
+  try { annCanvas.setPointerCapture(e.pointerId); } catch {}
+  const [x, y] = getPos(e);
+
+  if (teachMode) {
+    const hit = findCoverAt(x, y);
+    if (hit) { hit.hidden = true; redraw(); }
+    return;
+  }
+
+  if (currentTool === 'eraser') { eraseAt(x, y); return; }
+
+  let color = currentColor, width = currentSize, type = currentTool;
+  if (type === 'highlight') {
+    width = Math.max(currentSize * 4, 12);
+  } else if (type === 'cover') {
+    width = Math.max(currentSize * 4, 16);
+  }
+
+  currentStroke = { id: nextId++, page: currentPage, type, color, width, points: [[x, y]], hidden: false };
+  annotations.push(currentStroke);
+  redraw();
+}
+
+function onPointerMove(e) {
+  if (!pdfDoc) return;
+  if (currentTool === 'eraser') {
+    if (e.buttons > 0) {
+      const [x, y] = getPos(e);
+      eraseAt(x, y);
+    }
+    return;
+  }
+  if (!currentStroke) return;
+  if (e.buttons === 0) { onPointerUp(e); return; }
+  const [x, y] = getPos(e);
+  currentStroke.points.push([x, y]);
+  redraw();
+}
+
+function onPointerUp(e) {
+  if (currentStroke) {
+    try { annCanvas.releasePointerCapture(e.pointerId); } catch {}
+    currentStroke = null;
+  }
+}
+
+function eraseAt(x, y) {
+  const r = currentSize * 2 + 4;
+  let changed = false;
+  for (let i = annotations.length - 1; i >= 0; i--) {
+    const a = annotations[i];
+    if (a.page !== currentPage) continue;
+    for (const [px, py] of a.points) {
+      if (Math.hypot(px - x, py - y) < r) {
+        annotations.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (changed) redraw();
+}
+
+function findCoverAt(x, y) {
+  for (let i = annotations.length - 1; i >= 0; i--) {
+    const a = annotations[i];
+    if (a.page !== currentPage || a.hidden || a.type !== 'cover') continue;
+    const r = (a.width / 2) + 6;
+    for (const [px, py] of a.points) {
+      if (Math.hypot(px - x, py - y) < r) return a;
+    }
+  }
+  return null;
+}
+
+async function savePdf() {
+  if (!pdfDoc || !originalPdfBytes) return;
+  statusEl.textContent = 'Saving…';
+  try {
+    const libDoc = await PDFDocument.load(originalPdfBytes.slice(0));
+    const json = JSON.stringify({ annotations, savedAt: new Date().toISOString() });
+    const b64 = btoa(unescape(encodeURIComponent(json)));
+    const infoRef = libDoc.context.trailerInfo.Info;
+    const infoDict = libDoc.context.lookup(infoRef);
+    infoDict.set(PDFName.of(ANNOT_KEY), PDFHexString.fromText(b64));
+    const bytes = await libDoc.save();
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = pdfFileName + '.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+    statusEl.textContent = `Saved ${a.download} with ${annotations.length} annotations embedded.`;
+  } catch (err) {
+    console.error(err);
+    alert('Save failed: ' + err.message);
+    statusEl.textContent = 'Save failed.';
+  }
+}
+</script>
+</body>
+</html>
