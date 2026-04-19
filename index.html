@@ -33,12 +33,13 @@
   .preset .pswatch { display: inline-block; width: 22px; height: 6px; border-radius: 3px; }
   .preset .psize { font-size: 10px; color: #aaa; }
   #pageInfo { font-size: 13px; min-width: 70px; text-align: center; }
-  #canvasWrap { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 20px; background: #2a2a2a; }
-  #canvasContainer { position: relative; box-shadow: 0 4px 20px rgba(0,0,0,0.5); background: white; }
-  #pdfCanvas { display: block; }
-  #highlightCanvas { position: absolute; top: 0; left: 0; mix-blend-mode: multiply; pointer-events: none; }
-  #annotationCanvas { position: absolute; top: 0; left: 0; touch-action: none; cursor: crosshair; }
-  body.teach #annotationCanvas { cursor: pointer; }
+  #canvasWrap { flex: 1; overflow: auto; display: flex; flex-direction: column; align-items: center; padding: 20px; gap: 16px; background: #2a2a2a; }
+  .pageWrap { position: relative; box-shadow: 0 4px 20px rgba(0,0,0,0.5); background: white; }
+  .pageWrap .pdfCanvas { display: block; }
+  .pageWrap .hlCanvas { position: absolute; top: 0; left: 0; mix-blend-mode: multiply; pointer-events: none; }
+  .pageWrap .annCanvas { position: absolute; top: 0; left: 0; touch-action: none; cursor: crosshair; }
+  body.teach .pageWrap .annCanvas { cursor: pointer; }
+  .pageLabel { position: absolute; top: -18px; left: 0; font-size: 11px; color: #888; }
   #status { padding: 6px 12px; background: #1a1a1a; font-size: 12px; color: #888; border-top: 1px solid #444; }
   #empty { color: #888; padding: 60px; text-align: center; font-size: 14px; line-height: 1.6; }
   #brandbar { background: #0a0a0a; padding: 6px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #1a1a1a; }
@@ -92,11 +93,7 @@
     just reopen the saved PDF to keep editing.<br><br>
     <span style="font-size:12px">Shortcuts: ← → page nav · T teach mode · R reset covers</span>
   </div>
-  <div id="canvasContainer" style="display:none">
-    <canvas id="pdfCanvas"></canvas>
-    <canvas id="highlightCanvas"></canvas>
-    <canvas id="annotationCanvas"></canvas>
-  </div>
+  <div id="pagesHost" style="display:none; flex-direction:column; align-items:center; gap:16px;"></div>
 </div>
 <div id="status">Open a PDF to start.</div>
 
@@ -162,14 +159,10 @@ let tempRect = null;
 let clipboardImage = null;
 const imageCache = new Map();
 
-const pdfCanvas = document.getElementById('pdfCanvas');
-const hlCanvas = document.getElementById('highlightCanvas');
-const annCanvas = document.getElementById('annotationCanvas');
-const pdfCtx = pdfCanvas.getContext('2d');
-const hlCtx = hlCanvas.getContext('2d');
-const annCtx = annCanvas.getContext('2d');
+const pageElements = new Map(); // pageNum -> { wrap, pdfCanvas, hlCanvas, annCanvas, pdfCtx, hlCtx, annCtx, width, height }
 const statusEl = document.getElementById('status');
-const container = document.getElementById('canvasContainer');
+const pagesHost = document.getElementById('pagesHost');
+const canvasWrap = document.getElementById('canvasWrap');
 const emptyEl = document.getElementById('empty');
 
 document.getElementById('openBtn').onclick = () => document.getElementById('fileInput').click();
@@ -199,7 +192,7 @@ function setTool(t) {
   } else {
     snipState = null;
     tempRect = null;
-    redraw();
+    redrawAll();
   }
 }
 
@@ -321,14 +314,14 @@ function toggleTeach() {
 function resetCovers() {
   let n = 0;
   annotations.forEach(a => { if (a.type === 'cover' && a.hidden) { a.hidden = false; n++; } });
-  redraw();
+  redrawAll();
   if (n) statusEl.textContent = `Reset ${n} cover${n>1?'s':''}.`;
 }
 
-function setZoom(s) {
+async function setZoom(s) {
   scale = Math.max(0.4, Math.min(4, s));
   document.getElementById('zoomInfo').textContent = Math.round(scale * 100 / baseScale) + '%';
-  if (pdfDoc) renderPage();
+  if (pdfDoc) await renderAllPages();
 }
 
 async function handleFile(e) {
@@ -361,8 +354,9 @@ async function handleFile(e) {
 
   currentPage = 1;
   emptyEl.style.display = 'none';
-  container.style.display = 'block';
-  await renderPage();
+  pagesHost.style.display = 'flex';
+  statusEl.textContent = `Loading ${pdfDoc.numPages} pages…`;
+  await renderAllPages();
   statusEl.textContent = annotations.length
     ? `Loaded ${file.name} (${pdfDoc.numPages} pages, ${annotations.length} annotations).`
     : `Loaded ${file.name} (${pdfDoc.numPages} pages).`;
@@ -370,81 +364,154 @@ async function handleFile(e) {
   e.target.value = '';
 }
 
-async function renderPage() {
+function createPageElement(pageNum, width, height) {
+  const wrap = document.createElement('div');
+  wrap.className = 'pageWrap';
+  wrap.dataset.page = pageNum;
+  wrap.style.width = width + 'px';
+  wrap.style.height = height + 'px';
+
+  const label = document.createElement('div');
+  label.className = 'pageLabel';
+  label.textContent = `Page ${pageNum}`;
+  wrap.appendChild(label);
+
+  const pdfCanvas = document.createElement('canvas');
+  pdfCanvas.className = 'pdfCanvas';
+  pdfCanvas.width = width; pdfCanvas.height = height;
+  wrap.appendChild(pdfCanvas);
+
+  const hlCanvas = document.createElement('canvas');
+  hlCanvas.className = 'hlCanvas';
+  hlCanvas.width = width; hlCanvas.height = height;
+  wrap.appendChild(hlCanvas);
+
+  const annCanvas = document.createElement('canvas');
+  annCanvas.className = 'annCanvas';
+  annCanvas.width = width; annCanvas.height = height;
+  annCanvas.dataset.page = pageNum;
+  wrap.appendChild(annCanvas);
+
+  annCanvas.addEventListener('pointerdown', (e) => onPointerDown(e, pageNum));
+  annCanvas.addEventListener('pointermove', (e) => onPointerMove(e, pageNum));
+  annCanvas.addEventListener('pointerup', (e) => onPointerUp(e, pageNum));
+  annCanvas.addEventListener('pointercancel', (e) => onPointerUp(e, pageNum));
+  annCanvas.addEventListener('pointerleave', (e) => onPointerUp(e, pageNum));
+
+  return {
+    wrap, pdfCanvas, hlCanvas, annCanvas,
+    pdfCtx: pdfCanvas.getContext('2d'),
+    hlCtx: hlCanvas.getContext('2d'),
+    annCtx: annCanvas.getContext('2d'),
+    width, height,
+  };
+}
+
+async function renderAllPages() {
   if (!pdfDoc) return;
-  const token = ++renderToken;
-  const page = await pdfDoc.getPage(currentPage);
-  if (token !== renderToken) return;
-  const viewport = page.getViewport({ scale });
-  pdfCanvas.width = hlCanvas.width = annCanvas.width = viewport.width;
-  pdfCanvas.height = hlCanvas.height = annCanvas.height = viewport.height;
-  container.style.width = viewport.width + 'px';
-  container.style.height = viewport.height + 'px';
-  await page.render({ canvasContext: pdfCtx, viewport }).promise;
-  if (token !== renderToken) return;
-  document.getElementById('pageInfo').textContent = `${currentPage} / ${pdfDoc.numPages}`;
-  redraw();
+  pagesHost.innerHTML = '';
+  pageElements.clear();
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const page = await pdfDoc.getPage(i);
+    const viewport = page.getViewport({ scale });
+    const el = createPageElement(i, viewport.width, viewport.height);
+    pageElements.set(i, el);
+    pagesHost.appendChild(el.wrap);
+    await page.render({ canvasContext: el.pdfCtx, viewport }).promise;
+    redraw(i);
+  }
+  updateCurrentPageFromScroll();
 }
 
 function goToPage(n) {
   if (!pdfDoc) return;
   n = Math.max(1, Math.min(pdfDoc.numPages, n));
-  if (n === currentPage) return;
-  currentPage = n;
-  renderPage();
+  const el = pageElements.get(n);
+  if (el) {
+    el.wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    currentPage = n;
+    document.getElementById('pageInfo').textContent = `${currentPage} / ${pdfDoc.numPages}`;
+  }
 }
 
-function redraw() {
-  hlCtx.clearRect(0, 0, hlCanvas.width, hlCanvas.height);
-  annCtx.clearRect(0, 0, annCanvas.width, annCanvas.height);
+function updateCurrentPageFromScroll() {
+  if (!pdfDoc) return;
+  const wrapRect = canvasWrap.getBoundingClientRect();
+  const centerY = wrapRect.top + wrapRect.height / 2;
+  let best = 1, bestDist = Infinity;
+  for (const [page, el] of pageElements) {
+    const r = el.wrap.getBoundingClientRect();
+    const pageCenter = r.top + r.height / 2;
+    const dist = Math.abs(pageCenter - centerY);
+    if (dist < bestDist) { bestDist = dist; best = page; }
+  }
+  if (best !== currentPage) {
+    currentPage = best;
+    document.getElementById('pageInfo').textContent = `${currentPage} / ${pdfDoc.numPages}`;
+  }
+}
+
+canvasWrap.addEventListener('scroll', updateCurrentPageFromScroll);
+
+function redraw(pageNum) {
+  const el = pageElements.get(pageNum);
+  if (!el) return;
+  el.hlCtx.clearRect(0, 0, el.hlCanvas.width, el.hlCanvas.height);
+  el.annCtx.clearRect(0, 0, el.annCanvas.width, el.annCanvas.height);
   for (const a of annotations) {
-    if (a.page !== currentPage || a.hidden) continue;
-    drawStroke(a);
+    if (a.page !== pageNum || a.hidden) continue;
+    drawStroke(a, el);
   }
-  if (tempRect) {
-    annCtx.save();
-    annCtx.strokeStyle = '#0a84ff';
-    annCtx.setLineDash([6, 4]);
-    annCtx.lineWidth = 1;
-    annCtx.strokeRect(tempRect.x * scale, tempRect.y * scale, tempRect.w * scale, tempRect.h * scale);
-    annCtx.restore();
+  if (tempRect && tempRect.page === pageNum) {
+    el.annCtx.save();
+    el.annCtx.strokeStyle = '#0a84ff';
+    el.annCtx.setLineDash([6, 4]);
+    el.annCtx.lineWidth = 1;
+    el.annCtx.strokeRect(tempRect.x * scale, tempRect.y * scale, tempRect.w * scale, tempRect.h * scale);
+    el.annCtx.restore();
   }
+}
+
+function redrawAll() {
+  for (const page of pageElements.keys()) redraw(page);
 }
 
 function getImage(dataUrl) {
   if (imageCache.has(dataUrl)) return imageCache.get(dataUrl);
   const img = new Image();
-  img.onload = () => redraw();
+  img.onload = () => redrawAll();
   img.src = dataUrl;
   imageCache.set(dataUrl, img);
   return img;
 }
 
-function captureRegion(x, y, w, h) {
+function captureRegion(pageNum, x, y, w, h) {
+  const el = pageElements.get(pageNum);
+  if (!el) return null;
   const sx = x * scale, sy = y * scale, sw = w * scale, sh = h * scale;
   const tmp = document.createElement('canvas');
   tmp.width = sw; tmp.height = sh;
   const tctx = tmp.getContext('2d');
   tctx.fillStyle = '#ffffff';
   tctx.fillRect(0, 0, sw, sh);
-  tctx.drawImage(pdfCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  tctx.drawImage(el.pdfCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   tctx.globalCompositeOperation = 'multiply';
-  tctx.drawImage(hlCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  tctx.drawImage(el.hlCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   tctx.globalCompositeOperation = 'source-over';
-  tctx.drawImage(annCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  tctx.drawImage(el.annCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
   return tmp.toDataURL('image/png');
 }
 
-function drawStroke(a) {
+function drawStroke(a, el) {
   if (a.type === 'image') {
     const img = getImage(a.dataUrl);
     if (img.complete && img.naturalWidth > 0) {
-      annCtx.drawImage(img, a.x * scale, a.y * scale, a.width * scale, a.height * scale);
+      el.annCtx.drawImage(img, a.x * scale, a.y * scale, a.width * scale, a.height * scale);
     }
     return;
   }
   if (!a.points || !a.points.length) return;
-  const ctx = a.type === 'highlight' ? hlCtx : annCtx;
+  const ctx = a.type === 'highlight' ? el.hlCtx : el.annCtx;
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -463,28 +530,23 @@ function drawStroke(a) {
   ctx.restore();
 }
 
-annCanvas.addEventListener('pointerdown', onPointerDown);
-annCanvas.addEventListener('pointermove', onPointerMove);
-annCanvas.addEventListener('pointerup', onPointerUp);
-annCanvas.addEventListener('pointercancel', onPointerUp);
-annCanvas.addEventListener('pointerleave', onPointerUp);
-
-function getPos(e) {
-  const rect = annCanvas.getBoundingClientRect();
+function getPos(e, canvas) {
+  const rect = canvas.getBoundingClientRect();
   return [(e.clientX - rect.left) / scale, (e.clientY - rect.top) / scale];
 }
 
-function onPointerDown(e) {
+function onPointerDown(e, pageNum) {
   if (!pdfDoc) return;
   e.preventDefault();
-  try { annCanvas.setPointerCapture(e.pointerId); } catch {}
-  const [x, y] = getPos(e);
+  const el = pageElements.get(pageNum);
+  try { el.annCanvas.setPointerCapture(e.pointerId); } catch {}
+  const [x, y] = getPos(e, el.annCanvas);
 
   if (currentTool === 'snip') {
     if (snipState === 'paste' && clipboardImage) {
       annotations.push({
         id: nextId++,
-        page: currentPage,
+        page: pageNum,
         type: 'image',
         x: x - clipboardImage.width / 2,
         y: y - clipboardImage.height / 2,
@@ -492,24 +554,24 @@ function onPointerDown(e) {
         height: clipboardImage.height,
         dataUrl: clipboardImage.dataUrl,
       });
-      redraw();
+      redraw(pageNum);
       statusEl.textContent = 'Pasted. Click again to paste another copy, or pick another tool.';
       return;
     }
     snipState = 'select';
     snipStart = [x, y];
-    tempRect = { x, y, w: 0, h: 0 };
-    redraw();
+    tempRect = { x, y, w: 0, h: 0, page: pageNum };
+    redraw(pageNum);
     return;
   }
 
   if (teachMode) {
-    const hit = findCoverAt(x, y);
-    if (hit) { hit.hidden = true; redraw(); }
+    const hit = findCoverAt(pageNum, x, y);
+    if (hit) { hit.hidden = true; redraw(pageNum); }
     return;
   }
 
-  if (currentTool === 'eraser') { eraseAt(x, y); return; }
+  if (currentTool === 'eraser') { eraseAt(pageNum, x, y); return; }
 
   let color = currentColor, width = currentSize, type = currentTool;
   if (type === 'highlight') {
@@ -518,66 +580,70 @@ function onPointerDown(e) {
     width = Math.max(currentSize * 4, 16);
   }
 
-  currentStroke = { id: nextId++, page: currentPage, type, color, width, points: [[x, y]], hidden: false };
+  currentStroke = { id: nextId++, page: pageNum, type, color, width, points: [[x, y]], hidden: false };
   annotations.push(currentStroke);
-  redraw();
+  redraw(pageNum);
 }
 
-function onPointerMove(e) {
+function onPointerMove(e, pageNum) {
   if (!pdfDoc) return;
-  if (currentTool === 'snip' && snipState === 'select' && snipStart && e.buttons > 0) {
-    const [x, y] = getPos(e);
+  const el = pageElements.get(pageNum);
+  if (currentTool === 'snip' && snipState === 'select' && snipStart && tempRect && tempRect.page === pageNum && e.buttons > 0) {
+    const [x, y] = getPos(e, el.annCanvas);
     tempRect = {
       x: Math.min(snipStart[0], x),
       y: Math.min(snipStart[1], y),
       w: Math.abs(x - snipStart[0]),
       h: Math.abs(y - snipStart[1]),
+      page: pageNum,
     };
-    redraw();
+    redraw(pageNum);
     return;
   }
   if (currentTool === 'eraser') {
     if (e.buttons > 0) {
-      const [x, y] = getPos(e);
-      eraseAt(x, y);
+      const [x, y] = getPos(e, el.annCanvas);
+      eraseAt(pageNum, x, y);
     }
     return;
   }
-  if (!currentStroke) return;
-  if (e.buttons === 0) { onPointerUp(e); return; }
-  const [x, y] = getPos(e);
+  if (!currentStroke || currentStroke.page !== pageNum) return;
+  if (e.buttons === 0) { onPointerUp(e, pageNum); return; }
+  const [x, y] = getPos(e, el.annCanvas);
   currentStroke.points.push([x, y]);
-  redraw();
+  redraw(pageNum);
 }
 
-function onPointerUp(e) {
-  if (currentTool === 'snip' && snipState === 'select' && tempRect) {
+function onPointerUp(e, pageNum) {
+  const el = pageElements.get(pageNum);
+  if (currentTool === 'snip' && snipState === 'select' && tempRect && tempRect.page === pageNum) {
     if (tempRect.w > 5 && tempRect.h > 5) {
-      const dataUrl = captureRegion(tempRect.x, tempRect.y, tempRect.w, tempRect.h);
+      const dataUrl = captureRegion(pageNum, tempRect.x, tempRect.y, tempRect.w, tempRect.h);
       clipboardImage = { dataUrl, width: tempRect.w, height: tempRect.h };
       snipState = 'paste';
-      statusEl.textContent = `Captured ${Math.round(tempRect.w)}×${Math.round(tempRect.h)}. Click anywhere to paste.`;
+      statusEl.textContent = `Captured ${Math.round(tempRect.w)}×${Math.round(tempRect.h)}. Click anywhere on any page to paste.`;
     } else {
       snipState = clipboardImage ? 'paste' : 'select';
       statusEl.textContent = 'Snip too small. Drag a larger region.';
     }
     snipStart = null;
+    const clearPage = tempRect ? tempRect.page : pageNum;
     tempRect = null;
-    redraw();
+    redraw(clearPage);
     return;
   }
   if (currentStroke) {
-    try { annCanvas.releasePointerCapture(e.pointerId); } catch {}
+    try { el && el.annCanvas.releasePointerCapture(e.pointerId); } catch {}
     currentStroke = null;
   }
 }
 
-function eraseAt(x, y) {
+function eraseAt(pageNum, x, y) {
   const r = currentSize * 2 + 4;
   let changed = false;
   for (let i = annotations.length - 1; i >= 0; i--) {
     const a = annotations[i];
-    if (a.page !== currentPage) continue;
+    if (a.page !== pageNum) continue;
     if (a.type === 'image') {
       if (x >= a.x && x <= a.x + a.width && y >= a.y && y <= a.y + a.height) {
         annotations.splice(i, 1);
@@ -594,13 +660,13 @@ function eraseAt(x, y) {
       }
     }
   }
-  if (changed) redraw();
+  if (changed) redraw(pageNum);
 }
 
-function findCoverAt(x, y) {
+function findCoverAt(pageNum, x, y) {
   for (let i = annotations.length - 1; i >= 0; i--) {
     const a = annotations[i];
-    if (a.page !== currentPage || a.hidden || a.type !== 'cover') continue;
+    if (a.page !== pageNum || a.hidden || a.type !== 'cover') continue;
     const r = (a.width / 2) + 6;
     for (const [px, py] of a.points) {
       if (Math.hypot(px - x, py - y) < r) return a;
