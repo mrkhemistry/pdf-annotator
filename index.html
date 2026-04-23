@@ -48,12 +48,26 @@
   #brandbar { background: #0a0a0a; padding: 6px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #1a1a1a; }
   #brandbar img { width: 26px; height: 26px; }
   #brandbar span { font-size: 14px; font-weight: 600; color: #a0c8d4; letter-spacing: 0.5px; }
+  #tabbar { background: #141414; padding: 0 8px; display: flex; align-items: stretch; gap: 2px; min-height: 30px; border-bottom: 1px solid #2a2a2a; overflow-x: auto; }
+  #tabList { display: flex; gap: 2px; align-items: stretch; }
+  .tab { background: #1f1f1f; color: #aaa; padding: 6px 10px 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 12px; max-width: 240px; border-top: 2px solid transparent; }
+  .tab:hover { background: #2a2a2a; color: #ddd; }
+  .tab.active { background: #1a1a1a; color: #fff; border-top-color: #0a84ff; }
+  .tab-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+  .tab-close { color: #777; font-size: 16px; line-height: 1; padding: 2px 5px; border-radius: 3px; }
+  .tab-close:hover { color: #fff; background: #444; }
+  #newTabBtn { background: transparent; color: #888; border: none; padding: 4px 12px; font-size: 18px; cursor: pointer; align-self: center; }
+  #newTabBtn:hover { color: #fff; }
 </style>
 </head>
 <body>
 <div id="brandbar">
   <img src="icon.svg" alt="">
   <span>Mr Khemistry PDF Annotator</span>
+</div>
+<div id="tabbar" style="display:none;">
+  <div id="tabList"></div>
+  <button id="newTabBtn" title="Open another PDF">+</button>
 </div>
 <div id="toolbar">
   <button id="openBtn">Open PDF</button>
@@ -140,10 +154,26 @@ const DEFAULT_PRESETS = [
   { tool: 'eraser',    color: '#000000', size: 6 },
 ];
 
-let pdfDoc = null;
-let originalPdfBytes = null;
-let pdfFileName = 'document';
-let currentPage = 1;
+// Multi-document state
+class Doc {
+  constructor(id, fileName) {
+    this.id = id;
+    this.fileName = fileName;
+    this.pdfDoc = null;
+    this.originalPdfBytes = null;
+    this.annotations = [];
+    this.nextId = 1;
+    this.currentPage = 1;
+    this.pageElements = new Map();
+    this.pagesContainer = document.createElement('div');
+    this.pagesContainer.style.cssText = 'display:none; flex-direction:column; align-items:center; gap:16px;';
+  }
+}
+const docs = new Map();
+let activeDocId = null;
+let nextDocId = 1;
+function D() { return activeDocId !== null ? docs.get(activeDocId) : null; }
+
 let scale = 1.5;
 const baseScale = 1.5;
 let currentTool = 'ink';
@@ -152,21 +182,20 @@ let currentSize = 3;
 let activePreset = -1;
 let presets = loadPresets();
 let teachMode = false;
-let annotations = [];
 let currentStroke = null;
-let nextId = 1;
-let renderToken = 0;
 let snipState = null;
 let snipStart = null;
 let tempRect = null;
 let clipboardImage = null;
 const imageCache = new Map();
 
-const pageElements = new Map(); // pageNum -> { wrap, pdfCanvas, hlCanvas, annCanvas, pdfCtx, hlCtx, annCtx, width, height }
 const statusEl = document.getElementById('status');
 const pagesHost = document.getElementById('pagesHost');
 const canvasWrap = document.getElementById('canvasWrap');
 const emptyEl = document.getElementById('empty');
+const tabbarEl = document.getElementById('tabbar');
+const tabListEl = document.getElementById('tabList');
+document.getElementById('newTabBtn').onclick = () => document.getElementById('fileInput').click();
 
 document.getElementById('openBtn').onclick = () => document.getElementById('fileInput').click();
 document.getElementById('fileInput').onchange = handleFile;
@@ -302,8 +331,8 @@ function savePresetFromCurrent(i) {
 
 renderPalette();
 renderPresets();
-document.getElementById('prevBtn').onclick = () => goToPage(currentPage - 1);
-document.getElementById('nextBtn').onclick = () => goToPage(currentPage + 1);
+document.getElementById('prevBtn').onclick = () => { const d = D(); if (d) goToPage(d.currentPage - 1); };
+document.getElementById('nextBtn').onclick = () => { const d = D(); if (d) goToPage(d.currentPage + 1); };
 document.getElementById('pageJump').onchange = e => {
   const n = +e.target.value;
   if (n) goToPage(n);
@@ -314,8 +343,9 @@ document.getElementById('zoomOutBtn').onclick = () => setZoom(scale / 1.2);
 
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
-  if (e.key === 'ArrowLeft') goToPage(currentPage - 1);
-  else if (e.key === 'ArrowRight') goToPage(currentPage + 1);
+  const d = D();
+  if (e.key === 'ArrowLeft') { if (d) goToPage(d.currentPage - 1); }
+  else if (e.key === 'ArrowRight') { if (d) goToPage(d.currentPage + 1); }
   else if (e.key.toLowerCase() === 'r') resetCovers();
   else if (e.key.toLowerCase() === 't') toggleTeach();
 });
@@ -329,8 +359,9 @@ function toggleTeach() {
 }
 
 function resetCovers() {
+  const d = D(); if (!d) return;
   let n = 0;
-  annotations.forEach(a => { if (a.type === 'cover' && a.hidden) { a.hidden = false; n++; } });
+  d.annotations.forEach(a => { if (a.type === 'cover' && a.hidden) { a.hidden = false; n++; } });
   redrawAll();
   if (n) statusEl.textContent = `Reset ${n} cover${n>1?'s':''}.`;
 }
@@ -338,7 +369,10 @@ function resetCovers() {
 async function setZoom(s) {
   scale = Math.max(0.4, Math.min(4, s));
   document.getElementById('zoomInfo').textContent = Math.round(scale * 100 / baseScale) + '%';
-  if (pdfDoc) await renderAllPages();
+  // Re-render all pages of all open docs at new scale
+  for (const doc of docs.values()) {
+    await renderAllPagesForDoc(doc);
+  }
 }
 
 async function handleFile(e) {
@@ -349,15 +383,13 @@ async function handleFile(e) {
 }
 
 async function loadPdfFile(file) {
-  pdfFileName = file.name.replace(/\.pdf$/i, '');
-  originalPdfBytes = await file.arrayBuffer();
+  const doc = new Doc(nextDocId++, file.name.replace(/\.pdf$/i, ''));
+  doc.originalPdfBytes = await file.arrayBuffer();
+  doc.pdfDoc = await pdfjsLib.getDocument({ data: doc.originalPdfBytes.slice(0) }).promise;
 
-  pdfDoc = await pdfjsLib.getDocument({ data: originalPdfBytes.slice(0) }).promise;
-
-  annotations = [];
-  nextId = 1;
+  // Load embedded annotations if present
   try {
-    const libDoc = await PDFDocument.load(originalPdfBytes.slice(0));
+    const libDoc = await PDFDocument.load(doc.originalPdfBytes.slice(0));
     const infoRef = libDoc.context.trailerInfo.Info;
     if (infoRef) {
       const infoDict = libDoc.context.lookup(infoRef);
@@ -366,25 +398,89 @@ async function loadPdfFile(file) {
         const b64 = typeof v.decodeText === 'function' ? v.decodeText() : v.asString();
         const json = decodeURIComponent(escape(atob(b64)));
         const data = JSON.parse(json);
-        annotations = data.annotations || [];
-        nextId = annotations.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
+        doc.annotations = data.annotations || [];
+        doc.nextId = doc.annotations.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
       }
     }
   } catch (err) {
     console.warn('No embedded annotations or failed to parse:', err);
   }
 
-  currentPage = 1;
+  docs.set(doc.id, doc);
+  pagesHost.appendChild(doc.pagesContainer);
   emptyEl.style.display = 'none';
   pagesHost.style.display = 'flex';
-  statusEl.textContent = `Loading ${pdfDoc.numPages} pages…`;
-  await renderAllPages();
-  statusEl.textContent = annotations.length
-    ? `Loaded ${file.name} (${pdfDoc.numPages} pages, ${annotations.length} annotations).`
-    : `Loaded ${file.name} (${pdfDoc.numPages} pages).`;
+  tabbarEl.style.display = 'flex';
+  statusEl.textContent = `Loading ${doc.pdfDoc.numPages} pages…`;
+
+  await renderAllPagesForDoc(doc);
+  switchToDoc(doc.id);
+  renderTabs();
+
+  statusEl.textContent = doc.annotations.length
+    ? `Loaded ${file.name} (${doc.pdfDoc.numPages} pages, ${doc.annotations.length} annotations).`
+    : `Loaded ${file.name} (${doc.pdfDoc.numPages} pages).`;
 }
 
-function createPageElement(pageNum, width, height) {
+function renderTabs() {
+  tabListEl.innerHTML = '';
+  for (const [id, d] of docs) {
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (id === activeDocId ? ' active' : '');
+    const name = document.createElement('span');
+    name.className = 'tab-name';
+    name.textContent = d.fileName + '.pdf';
+    name.title = d.fileName + '.pdf';
+    name.onclick = () => switchToDoc(id);
+    const close = document.createElement('span');
+    close.className = 'tab-close';
+    close.textContent = '×';
+    close.title = 'Close tab';
+    close.onclick = (e) => { e.stopPropagation(); closeDoc(id); };
+    tab.appendChild(name);
+    tab.appendChild(close);
+    tabListEl.appendChild(tab);
+  }
+}
+
+function switchToDoc(id) {
+  const target = docs.get(id);
+  if (!target) return;
+  if (activeDocId !== null) {
+    const prev = docs.get(activeDocId);
+    if (prev) prev.pagesContainer.style.display = 'none';
+  }
+  activeDocId = id;
+  target.pagesContainer.style.display = 'flex';
+  document.getElementById('pageInfo').textContent = `${target.currentPage} / ${target.pdfDoc.numPages}`;
+  renderTabs();
+  // Reset transient tool state
+  if (snipState && snipState !== 'paste') { snipState = clipboardImage ? 'paste' : null; tempRect = null; }
+}
+
+function closeDoc(id) {
+  const d = docs.get(id);
+  if (!d) return;
+  if (!confirm(`Close "${d.fileName}.pdf"? Make sure you've saved any annotations you want to keep.`)) return;
+  d.pagesContainer.remove();
+  docs.delete(id);
+  if (activeDocId === id) {
+    activeDocId = null;
+    const remaining = [...docs.keys()];
+    if (remaining.length > 0) {
+      switchToDoc(remaining[remaining.length - 1]);
+    } else {
+      pagesHost.style.display = 'none';
+      tabbarEl.style.display = 'none';
+      emptyEl.style.display = 'block';
+      document.getElementById('pageInfo').textContent = '– / –';
+      statusEl.textContent = 'Closed.';
+    }
+  }
+  renderTabs();
+}
+
+function createPageElement(docId, pageNum, width, height) {
   const wrap = document.createElement('div');
   wrap.className = 'pageWrap';
   wrap.dataset.page = pageNum;
@@ -412,11 +508,11 @@ function createPageElement(pageNum, width, height) {
   annCanvas.dataset.page = pageNum;
   wrap.appendChild(annCanvas);
 
-  annCanvas.addEventListener('pointerdown', (e) => onPointerDown(e, pageNum));
-  annCanvas.addEventListener('pointermove', (e) => onPointerMove(e, pageNum));
-  annCanvas.addEventListener('pointerup', (e) => onPointerUp(e, pageNum));
-  annCanvas.addEventListener('pointercancel', (e) => onPointerUp(e, pageNum));
-  annCanvas.addEventListener('pointerleave', (e) => onPointerUp(e, pageNum));
+  annCanvas.addEventListener('pointerdown', (e) => onPointerDown(e, docId, pageNum));
+  annCanvas.addEventListener('pointermove', (e) => onPointerMove(e, docId, pageNum));
+  annCanvas.addEventListener('pointerup', (e) => onPointerUp(e, docId, pageNum));
+  annCanvas.addEventListener('pointercancel', (e) => onPointerUp(e, docId, pageNum));
+  annCanvas.addEventListener('pointerleave', (e) => onPointerUp(e, docId, pageNum));
 
   return {
     wrap, pdfCanvas, hlCanvas, annCanvas,
@@ -427,62 +523,62 @@ function createPageElement(pageNum, width, height) {
   };
 }
 
-async function renderAllPages() {
-  if (!pdfDoc) return;
-  pagesHost.innerHTML = '';
-  pageElements.clear();
-  for (let i = 1; i <= pdfDoc.numPages; i++) {
-    const page = await pdfDoc.getPage(i);
+async function renderAllPagesForDoc(doc) {
+  if (!doc.pdfDoc) return;
+  doc.pagesContainer.innerHTML = '';
+  doc.pageElements.clear();
+  for (let i = 1; i <= doc.pdfDoc.numPages; i++) {
+    const page = await doc.pdfDoc.getPage(i);
     const viewport = page.getViewport({ scale });
-    const el = createPageElement(i, viewport.width, viewport.height);
-    pageElements.set(i, el);
-    pagesHost.appendChild(el.wrap);
+    const el = createPageElement(doc.id, i, viewport.width, viewport.height);
+    doc.pageElements.set(i, el);
+    doc.pagesContainer.appendChild(el.wrap);
     await page.render({ canvasContext: el.pdfCtx, viewport }).promise;
-    redraw(i);
+    drawAnnotationsOnPage(doc, i);
   }
   updateCurrentPageFromScroll();
 }
 
 function goToPage(n) {
-  if (!pdfDoc) return;
-  n = Math.max(1, Math.min(pdfDoc.numPages, n));
-  const el = pageElements.get(n);
+  const d = D(); if (!d) return;
+  n = Math.max(1, Math.min(d.pdfDoc.numPages, n));
+  const el = d.pageElements.get(n);
   if (el) {
     el.wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    currentPage = n;
-    document.getElementById('pageInfo').textContent = `${currentPage} / ${pdfDoc.numPages}`;
+    d.currentPage = n;
+    document.getElementById('pageInfo').textContent = `${d.currentPage} / ${d.pdfDoc.numPages}`;
   }
 }
 
 function updateCurrentPageFromScroll() {
-  if (!pdfDoc) return;
+  const d = D(); if (!d) return;
   const wrapRect = canvasWrap.getBoundingClientRect();
   const centerY = wrapRect.top + wrapRect.height / 2;
   let best = 1, bestDist = Infinity;
-  for (const [page, el] of pageElements) {
+  for (const [page, el] of d.pageElements) {
     const r = el.wrap.getBoundingClientRect();
     const pageCenter = r.top + r.height / 2;
     const dist = Math.abs(pageCenter - centerY);
     if (dist < bestDist) { bestDist = dist; best = page; }
   }
-  if (best !== currentPage) {
-    currentPage = best;
-    document.getElementById('pageInfo').textContent = `${currentPage} / ${pdfDoc.numPages}`;
+  if (best !== d.currentPage) {
+    d.currentPage = best;
+    document.getElementById('pageInfo').textContent = `${d.currentPage} / ${d.pdfDoc.numPages}`;
   }
 }
 
 canvasWrap.addEventListener('scroll', updateCurrentPageFromScroll);
 
-function redraw(pageNum) {
-  const el = pageElements.get(pageNum);
+function drawAnnotationsOnPage(doc, pageNum) {
+  const el = doc.pageElements.get(pageNum);
   if (!el) return;
   el.hlCtx.clearRect(0, 0, el.hlCanvas.width, el.hlCanvas.height);
   el.annCtx.clearRect(0, 0, el.annCanvas.width, el.annCanvas.height);
-  for (const a of annotations) {
+  for (const a of doc.annotations) {
     if (a.page !== pageNum || a.hidden) continue;
     drawStroke(a, el);
   }
-  if (tempRect && tempRect.page === pageNum) {
+  if (tempRect && tempRect.docId === doc.id && tempRect.page === pageNum) {
     el.annCtx.save();
     el.annCtx.strokeStyle = '#0a84ff';
     el.annCtx.setLineDash([6, 4]);
@@ -492,21 +588,33 @@ function redraw(pageNum) {
   }
 }
 
+function redraw(pageNum) {
+  const d = D(); if (!d) return;
+  drawAnnotationsOnPage(d, pageNum);
+}
+
 function redrawAll() {
-  for (const page of pageElements.keys()) redraw(page);
+  const d = D(); if (!d) return;
+  for (const page of d.pageElements.keys()) drawAnnotationsOnPage(d, page);
+}
+
+function redrawAllAcrossDocs() {
+  for (const doc of docs.values()) {
+    for (const page of doc.pageElements.keys()) drawAnnotationsOnPage(doc, page);
+  }
 }
 
 function getImage(dataUrl) {
   if (imageCache.has(dataUrl)) return imageCache.get(dataUrl);
   const img = new Image();
-  img.onload = () => redrawAll();
+  img.onload = () => redrawAllAcrossDocs();
   img.src = dataUrl;
   imageCache.set(dataUrl, img);
   return img;
 }
 
-function captureRegion(pageNum, x, y, w, h) {
-  const el = pageElements.get(pageNum);
+function captureRegion(doc, pageNum, x, y, w, h) {
+  const el = doc.pageElements.get(pageNum);
   if (!el) return null;
   const sx = x * scale, sy = y * scale, sw = w * scale, sh = h * scale;
   const tmp = document.createElement('canvas');
@@ -555,17 +663,18 @@ function getPos(e, canvas) {
   return [(e.clientX - rect.left) / scale, (e.clientY - rect.top) / scale];
 }
 
-function onPointerDown(e, pageNum) {
-  if (!pdfDoc) return;
+function onPointerDown(e, docId, pageNum) {
+  const doc = docs.get(docId);
+  if (!doc) return;
   e.preventDefault();
-  const el = pageElements.get(pageNum);
+  const el = doc.pageElements.get(pageNum);
   try { el.annCanvas.setPointerCapture(e.pointerId); } catch {}
   const [x, y] = getPos(e, el.annCanvas);
 
   if (currentTool === 'snip') {
     if (snipState === 'paste' && clipboardImage) {
-      annotations.push({
-        id: nextId++,
+      doc.annotations.push({
+        id: doc.nextId++,
         page: pageNum,
         type: 'image',
         x: x - clipboardImage.width / 2,
@@ -574,24 +683,24 @@ function onPointerDown(e, pageNum) {
         height: clipboardImage.height,
         dataUrl: clipboardImage.dataUrl,
       });
-      redraw(pageNum);
+      drawAnnotationsOnPage(doc, pageNum);
       statusEl.textContent = 'Pasted. Click again to paste another copy, or pick another tool.';
       return;
     }
     snipState = 'select';
     snipStart = [x, y];
-    tempRect = { x, y, w: 0, h: 0, page: pageNum };
-    redraw(pageNum);
+    tempRect = { x, y, w: 0, h: 0, page: pageNum, docId };
+    drawAnnotationsOnPage(doc, pageNum);
     return;
   }
 
   if (teachMode) {
-    const hit = findCoverAt(pageNum, x, y);
-    if (hit) { hit.hidden = true; redraw(pageNum); }
+    const hit = findCoverAt(doc, pageNum, x, y);
+    if (hit) { hit.hidden = true; drawAnnotationsOnPage(doc, pageNum); }
     return;
   }
 
-  if (currentTool === 'eraser') { eraseAt(pageNum, x, y); return; }
+  if (currentTool === 'eraser') { eraseAt(doc, pageNum, x, y); return; }
 
   let color = currentColor, width = currentSize, type = currentTool;
   if (type === 'highlight') {
@@ -600,15 +709,16 @@ function onPointerDown(e, pageNum) {
     width = Math.max(currentSize * 4, 16);
   }
 
-  currentStroke = { id: nextId++, page: pageNum, type, color, width, points: [[x, y]], hidden: false };
-  annotations.push(currentStroke);
-  redraw(pageNum);
+  currentStroke = { id: doc.nextId++, page: pageNum, docId, type, color, width, points: [[x, y]], hidden: false };
+  doc.annotations.push(currentStroke);
+  drawAnnotationsOnPage(doc, pageNum);
 }
 
-function onPointerMove(e, pageNum) {
-  if (!pdfDoc) return;
-  const el = pageElements.get(pageNum);
-  if (currentTool === 'snip' && snipState === 'select' && snipStart && tempRect && tempRect.page === pageNum && e.buttons > 0) {
+function onPointerMove(e, docId, pageNum) {
+  const doc = docs.get(docId);
+  if (!doc) return;
+  const el = doc.pageElements.get(pageNum);
+  if (currentTool === 'snip' && snipState === 'select' && snipStart && tempRect && tempRect.docId === docId && tempRect.page === pageNum && e.buttons > 0) {
     const [x, y] = getPos(e, el.annCanvas);
     tempRect = {
       x: Math.min(snipStart[0], x),
@@ -616,40 +726,44 @@ function onPointerMove(e, pageNum) {
       w: Math.abs(x - snipStart[0]),
       h: Math.abs(y - snipStart[1]),
       page: pageNum,
+      docId,
     };
-    redraw(pageNum);
+    drawAnnotationsOnPage(doc, pageNum);
     return;
   }
   if (currentTool === 'eraser') {
     if (e.buttons > 0) {
       const [x, y] = getPos(e, el.annCanvas);
-      eraseAt(pageNum, x, y);
+      eraseAt(doc, pageNum, x, y);
     }
     return;
   }
-  if (!currentStroke || currentStroke.page !== pageNum) return;
-  if (e.buttons === 0) { onPointerUp(e, pageNum); return; }
+  if (!currentStroke || currentStroke.docId !== docId || currentStroke.page !== pageNum) return;
+  if (e.buttons === 0) { onPointerUp(e, docId, pageNum); return; }
   const [x, y] = getPos(e, el.annCanvas);
   currentStroke.points.push([x, y]);
-  redraw(pageNum);
+  drawAnnotationsOnPage(doc, pageNum);
 }
 
-function onPointerUp(e, pageNum) {
-  const el = pageElements.get(pageNum);
-  if (currentTool === 'snip' && snipState === 'select' && tempRect && tempRect.page === pageNum) {
+function onPointerUp(e, docId, pageNum) {
+  const doc = docs.get(docId);
+  const el = doc?.pageElements.get(pageNum);
+  if (currentTool === 'snip' && snipState === 'select' && tempRect && tempRect.docId === docId && tempRect.page === pageNum) {
     if (tempRect.w > 5 && tempRect.h > 5) {
-      const dataUrl = captureRegion(pageNum, tempRect.x, tempRect.y, tempRect.w, tempRect.h);
+      const dataUrl = captureRegion(doc, pageNum, tempRect.x, tempRect.y, tempRect.w, tempRect.h);
       clipboardImage = { dataUrl, width: tempRect.w, height: tempRect.h };
       snipState = 'paste';
-      statusEl.textContent = `Captured ${Math.round(tempRect.w)}×${Math.round(tempRect.h)}. Click anywhere on any page to paste.`;
+      statusEl.textContent = `Captured ${Math.round(tempRect.w)}×${Math.round(tempRect.h)}. Click anywhere on any page (any tab) to paste.`;
     } else {
       snipState = clipboardImage ? 'paste' : 'select';
       statusEl.textContent = 'Snip too small. Drag a larger region.';
     }
     snipStart = null;
     const clearPage = tempRect ? tempRect.page : pageNum;
+    const clearDocId = tempRect ? tempRect.docId : docId;
     tempRect = null;
-    redraw(clearPage);
+    const clearDoc = docs.get(clearDocId);
+    if (clearDoc) drawAnnotationsOnPage(clearDoc, clearPage);
     return;
   }
   if (currentStroke) {
@@ -658,15 +772,15 @@ function onPointerUp(e, pageNum) {
   }
 }
 
-function eraseAt(pageNum, x, y) {
+function eraseAt(doc, pageNum, x, y) {
   const r = currentSize * 2 + 4;
   let changed = false;
-  for (let i = annotations.length - 1; i >= 0; i--) {
-    const a = annotations[i];
+  for (let i = doc.annotations.length - 1; i >= 0; i--) {
+    const a = doc.annotations[i];
     if (a.page !== pageNum) continue;
     if (a.type === 'image') {
       if (x >= a.x && x <= a.x + a.width && y >= a.y && y <= a.y + a.height) {
-        annotations.splice(i, 1);
+        doc.annotations.splice(i, 1);
         changed = true;
       }
       continue;
@@ -674,18 +788,18 @@ function eraseAt(pageNum, x, y) {
     if (!a.points) continue;
     for (const [px, py] of a.points) {
       if (Math.hypot(px - x, py - y) < r) {
-        annotations.splice(i, 1);
+        doc.annotations.splice(i, 1);
         changed = true;
         break;
       }
     }
   }
-  if (changed) redraw(pageNum);
+  if (changed) drawAnnotationsOnPage(doc, pageNum);
 }
 
-function findCoverAt(pageNum, x, y) {
-  for (let i = annotations.length - 1; i >= 0; i--) {
-    const a = annotations[i];
+function findCoverAt(doc, pageNum, x, y) {
+  for (let i = doc.annotations.length - 1; i >= 0; i--) {
+    const a = doc.annotations[i];
     if (a.page !== pageNum || a.hidden || a.type !== 'cover') continue;
     const r = (a.width / 2) + 6;
     for (const [px, py] of a.points) {
@@ -718,16 +832,17 @@ function hexToRgb(hex) {
 }
 
 async function exportFlattenedPdf() {
-  if (!pdfDoc || !originalPdfBytes) return;
+  const d = D();
+  if (!d || !d.pdfDoc || !d.originalPdfBytes) return;
   statusEl.textContent = 'Flattening…';
   try {
-    const libDoc = await PDFDocument.load(originalPdfBytes.slice(0));
+    const libDoc = await PDFDocument.load(d.originalPdfBytes.slice(0));
     const total = libDoc.getPageCount();
     for (let i = 0; i < total; i++) {
       const page = libDoc.getPage(i);
       const pageNum = i + 1;
       const ph = page.getHeight();
-      const pageAnns = annotations.filter(a => a.page === pageNum && !a.hidden && a.points.length);
+      const pageAnns = d.annotations.filter(a => a.page === pageNum && !a.hidden && (a.type === 'image' || (a.points && a.points.length)));
       // Order: highlights first (under), then ink/cover (over)
       pageAnns.sort((a, b) => (a.type === 'highlight' ? 0 : 1) - (b.type === 'highlight' ? 0 : 1));
       for (const a of pageAnns) {
@@ -771,7 +886,7 @@ async function exportFlattenedPdf() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = pdfFileName + '-flat.pdf';
+    a.download = d.fileName + '-flat.pdf';
     a.click();
     URL.revokeObjectURL(url);
     statusEl.textContent = `Exported flat copy: ${a.download}`;
@@ -783,11 +898,12 @@ async function exportFlattenedPdf() {
 }
 
 async function savePdf() {
-  if (!pdfDoc || !originalPdfBytes) return;
+  const d = D();
+  if (!d || !d.pdfDoc || !d.originalPdfBytes) return;
   statusEl.textContent = 'Saving…';
   try {
-    const libDoc = await PDFDocument.load(originalPdfBytes.slice(0));
-    const json = JSON.stringify({ annotations, savedAt: new Date().toISOString() });
+    const libDoc = await PDFDocument.load(d.originalPdfBytes.slice(0));
+    const json = JSON.stringify({ annotations: d.annotations, savedAt: new Date().toISOString() });
     const b64 = btoa(unescape(encodeURIComponent(json)));
     const infoRef = libDoc.context.trailerInfo.Info;
     const infoDict = libDoc.context.lookup(infoRef);
@@ -797,10 +913,10 @@ async function savePdf() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = pdfFileName + '.pdf';
+    a.download = d.fileName + '.pdf';
     a.click();
     URL.revokeObjectURL(url);
-    statusEl.textContent = `Saved ${a.download} with ${annotations.length} annotations embedded.`;
+    statusEl.textContent = `Saved ${a.download} with ${d.annotations.length} annotations embedded.`;
   } catch (err) {
     console.error(err);
     alert('Save failed: ' + err.message);
