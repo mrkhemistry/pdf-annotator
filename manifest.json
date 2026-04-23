@@ -15,5 +15,17 @@
       "type": "image/svg+xml",
       "purpose": "any"
     }
+  ],
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": {
+        "application/pdf": [".pdf"]
+      },
+      "icons": [
+        { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+      ],
+      "launch_type": "single-client"
+    }
   ]
 }
