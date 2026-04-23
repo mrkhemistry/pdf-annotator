@@ -1,4 +1,4 @@
-const CACHE = 'pdf-annot-v1';
+const CACHE = 'pdf-annot-v2';
 const ASSETS = ['./', './index.html', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (e) => {
