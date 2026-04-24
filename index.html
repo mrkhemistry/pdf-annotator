@@ -229,7 +229,7 @@ const canvasWrap = document.getElementById('canvasWrap');
 const emptyEl = document.getElementById('empty');
 const tabbarEl = document.getElementById('tabbar');
 const tabListEl = document.getElementById('tabList');
-document.getElementById('newTabBtn').onclick = () => document.getElementById('fileInput').click();
+document.getElementById('newTabBtn').onclick = () => openPdfDialog();
 
 document.getElementById('openBtn').onclick = openPdfDialog;
 document.getElementById('fileInput').onchange = handleFile;
@@ -1173,8 +1173,9 @@ async function savePdf() {
     a.download = d.fileName + '.pdf';
     a.click();
     URL.revokeObjectURL(url);
-    statusEl.textContent = `Downloaded ${a.download} (${d.annotations.length} annotations). Tip: open via Recent or "Open PDF" to enable in-place save.`;
-    showToast(`Downloaded ${a.download}`, 'info');
+    const reason = d.fileHandle ? 'permission denied' : 'no file handle (was opened via legacy method)';
+    statusEl.textContent = `Downloaded ${a.download} — ${reason}. To save in place, reopen via "Open PDF" and Allow when Chrome asks.`;
+    showToast(`Downloaded (not saved in place) — ${reason}`, 'info', 4000);
   } catch (err) {
     console.error(err);
     statusEl.textContent = 'Save failed.';
