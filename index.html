@@ -70,6 +70,11 @@
   .recent-actions button { flex: 1; padding: 6px 10px; background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 3px; cursor: pointer; font-size: 12px; }
   .recent-actions button:hover { background: #333; }
   .recent-checkbox { margin-right: 6px; }
+  .toast { position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%) translateY(20px); background: #1a1a1a; color: #eee; padding: 12px 24px; border-radius: 8px; border: 1px solid #444; font-size: 14px; font-weight: 500; opacity: 0; transition: all 0.25s ease; box-shadow: 0 6px 20px rgba(0,0,0,0.6); z-index: 1000; pointer-events: none; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast-success { border-color: #2ca02c; color: #8fdd8f; }
+  .toast-error { border-color: #e41a1c; color: #ff8a8a; }
+  .toast-info { border-color: #0a84ff; color: #9fc4ff; }
 </style>
 </head>
 <body>
@@ -190,6 +195,18 @@ const docs = new Map();
 let activeDocId = null;
 let nextDocId = 1;
 function D() { return activeDocId !== null ? docs.get(activeDocId) : null; }
+
+function showToast(msg, type = 'info', durationMs = 2200) {
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 250);
+  }, durationMs);
+}
 
 let scale = 1.5;
 const baseScale = 1.5;
@@ -1103,10 +1120,11 @@ async function exportFlattenedPdf() {
     a.click();
     URL.revokeObjectURL(url);
     statusEl.textContent = `Exported flat copy: ${a.download}`;
+    showToast(`Exported ${a.download}`, 'success');
   } catch (err) {
     console.error(err);
-    alert('Export failed: ' + err.message);
     statusEl.textContent = 'Export failed.';
+    showToast('Export failed: ' + err.message, 'error', 4000);
   }
 }
 
@@ -1136,9 +1154,11 @@ async function savePdf() {
           // Refresh the in-memory bytes so future saves use the latest
           d.originalPdfBytes = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
           statusEl.textContent = `Saved ${d.fileName}.pdf in place (${d.annotations.length} annotations).`;
+          showToast(`Saved ${d.fileName}.pdf`, 'success');
           return;
         } else {
           statusEl.textContent = 'Permission denied — falling back to download.';
+          showToast('Permission denied — downloading instead', 'info');
         }
       } catch (err) {
         console.warn('Write-back failed, falling back to download:', err);
@@ -1154,10 +1174,11 @@ async function savePdf() {
     a.click();
     URL.revokeObjectURL(url);
     statusEl.textContent = `Downloaded ${a.download} (${d.annotations.length} annotations). Tip: open via Recent or "Open PDF" to enable in-place save.`;
+    showToast(`Downloaded ${a.download}`, 'info');
   } catch (err) {
     console.error(err);
-    alert('Save failed: ' + err.message);
     statusEl.textContent = 'Save failed.';
+    showToast('Save failed: ' + err.message, 'error', 4000);
   }
 }
 </script>
