@@ -181,6 +181,7 @@ class Doc {
     this.nextId = 1;
     this.currentPage = 1;
     this.pageElements = new Map();
+    this.fileHandle = null; // FileSystemFileHandle if opened via File System Access API
     this.pagesContainer = document.createElement('div');
     this.pagesContainer.style.cssText = 'display:none; flex-direction:column; align-items:center; gap:16px;';
   }
@@ -298,7 +299,7 @@ async function openPdfDialog() {
       });
       for (const handle of handles) {
         const file = await handle.getFile();
-        await loadPdfFile(file);
+        await loadPdfFile(file, handle);
         await addRecent(handle);
       }
     } catch (err) {
@@ -311,16 +312,16 @@ async function openPdfDialog() {
 
 async function openRecent(record) {
   try {
-    let perm = await record.handle.queryPermission?.({ mode: 'read' }) ?? 'granted';
+    let perm = await record.handle.queryPermission?.({ mode: 'readwrite' }) ?? 'granted';
     if (perm !== 'granted') {
-      perm = await record.handle.requestPermission?.({ mode: 'read' }) ?? 'denied';
+      perm = await record.handle.requestPermission?.({ mode: 'readwrite' }) ?? 'denied';
     }
     if (perm !== 'granted') {
       alert('Permission denied for "' + record.name + '". Try opening manually.');
       return;
     }
     const file = await record.handle.getFile();
-    await loadPdfFile(file);
+    await loadPdfFile(file, record.handle);
     await addRecent(record.handle);
   } catch (err) {
     console.error('Open recent failed:', err);
@@ -412,7 +413,7 @@ if ('launchQueue' in window) {
     try {
       for (const handle of launchParams.files) {
         const file = await handle.getFile();
-        await loadPdfFile(file);
+        await loadPdfFile(file, handle);
         await addRecent(handle);
       }
     } catch (err) {
@@ -590,25 +591,29 @@ async function handleFile(e) {
   e.target.value = '';
 }
 
-async function loadPdfFile(file) {
+async function loadPdfFile(file, fileHandle = null) {
   const doc = new Doc(nextDocId++, file.name.replace(/\.pdf$/i, ''));
   doc.originalPdfBytes = await file.arrayBuffer();
+  doc.fileHandle = fileHandle;
   doc.pdfDoc = await pdfjsLib.getDocument({ data: doc.originalPdfBytes.slice(0) }).promise;
 
-  // Load embedded annotations if present
+  // Load embedded annotations if present (try Catalog first, fallback to Info dict)
   try {
     const libDoc = await PDFDocument.load(doc.originalPdfBytes.slice(0));
-    const infoRef = libDoc.context.trailerInfo.Info;
-    if (infoRef) {
-      const infoDict = libDoc.context.lookup(infoRef);
-      const v = infoDict?.get(PDFName.of(ANNOT_KEY));
-      if (v) {
-        const b64 = typeof v.decodeText === 'function' ? v.decodeText() : v.asString();
-        const json = decodeURIComponent(escape(atob(b64)));
-        const data = JSON.parse(json);
-        doc.annotations = data.annotations || [];
-        doc.nextId = doc.annotations.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
+    let v = libDoc.catalog.get(PDFName.of(ANNOT_KEY));
+    if (!v) {
+      const infoRef = libDoc.context.trailerInfo.Info;
+      if (infoRef) {
+        const infoDict = libDoc.context.lookup(infoRef);
+        v = infoDict?.get(PDFName.of(ANNOT_KEY));
       }
+    }
+    if (v) {
+      const b64 = typeof v.decodeText === 'function' ? v.decodeText() : (v.asString ? v.asString() : String(v));
+      const json = decodeURIComponent(escape(atob(b64)));
+      const data = JSON.parse(json);
+      doc.annotations = data.annotations || [];
+      doc.nextId = doc.annotations.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
     }
   } catch (err) {
     console.warn('No embedded annotations or failed to parse:', err);
@@ -1113,10 +1118,34 @@ async function savePdf() {
     const libDoc = await PDFDocument.load(d.originalPdfBytes.slice(0));
     const json = JSON.stringify({ annotations: d.annotations, savedAt: new Date().toISOString() });
     const b64 = btoa(unescape(encodeURIComponent(json)));
-    const infoRef = libDoc.context.trailerInfo.Info;
-    const infoDict = libDoc.context.lookup(infoRef);
-    infoDict.set(PDFName.of(ANNOT_KEY), PDFHexString.fromText(b64));
+    // Store in PDF Catalog (reliable for custom keys across save/load round trips)
+    libDoc.catalog.set(PDFName.of(ANNOT_KEY), PDFHexString.fromText(b64));
     const bytes = await libDoc.save();
+
+    // Try writing back to original file via File System Access API
+    if (d.fileHandle) {
+      try {
+        let perm = await d.fileHandle.queryPermission?.({ mode: 'readwrite' }) ?? 'granted';
+        if (perm !== 'granted') {
+          perm = await d.fileHandle.requestPermission?.({ mode: 'readwrite' }) ?? 'denied';
+        }
+        if (perm === 'granted') {
+          const writable = await d.fileHandle.createWritable();
+          await writable.write(bytes);
+          await writable.close();
+          // Refresh the in-memory bytes so future saves use the latest
+          d.originalPdfBytes = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+          statusEl.textContent = `Saved ${d.fileName}.pdf in place (${d.annotations.length} annotations).`;
+          return;
+        } else {
+          statusEl.textContent = 'Permission denied — falling back to download.';
+        }
+      } catch (err) {
+        console.warn('Write-back failed, falling back to download:', err);
+      }
+    }
+
+    // Fallback: download (e.g. when file was opened via legacy <input>, no handle available)
     const blob = new Blob([bytes], { type: 'application/pdf' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1124,7 +1153,7 @@ async function savePdf() {
     a.download = d.fileName + '.pdf';
     a.click();
     URL.revokeObjectURL(url);
-    statusEl.textContent = `Saved ${a.download} with ${d.annotations.length} annotations embedded.`;
+    statusEl.textContent = `Downloaded ${a.download} (${d.annotations.length} annotations). Tip: open via Recent or "Open PDF" to enable in-place save.`;
   } catch (err) {
     console.error(err);
     alert('Save failed: ' + err.message);
